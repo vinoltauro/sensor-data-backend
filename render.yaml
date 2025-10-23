@@ -3,10 +3,8 @@ services:
     name: sensor-data-backend
     env: node
     plan: free
-    buildCommand: npm install
+    buildCommand: npm run build
     startCommand: npm start
     envVars:
       - key: NODE_VERSION
-        value: 18.17.0
-      - key: PORT
-        value: 3001
+        value: 18
