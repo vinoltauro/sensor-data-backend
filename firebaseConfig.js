@@ -18,12 +18,25 @@ function initializeFirebase() {
   }
 
   try {
-    // Try to load service account from file
-    const serviceAccount = require('./firebase-admin-key.json');
+    let serviceAccount;
+    
+    if (process.env.FIREBASE_CONFIG_BASE64) {
+      // Decode from base64
+      console.log('📦 Loading Firebase config from base64 env variable');
+      const decoded = Buffer.from(process.env.FIREBASE_CONFIG_BASE64, 'base64').toString('utf-8');
+      serviceAccount = JSON.parse(decoded);
+    } else if (process.env.FIREBASE_CONFIG) {
+      // Direct JSON
+      console.log('📦 Loading Firebase config from JSON env variable');
+      serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG);
+    } else {
+      // Local development
+      console.log('📂 Loading Firebase config from file');
+      serviceAccount = require('./firebase-admin-key.json');
+    }
     
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-      databaseURL: process.env.FIREBASE_DATABASE_URL // Optional, for Realtime DB
+      credential: admin.credential.cert(serviceAccount)
     });
 
     firebaseInitialized = true;
@@ -31,13 +44,11 @@ function initializeFirebase() {
     
   } catch (error) {
     console.error('❌ Error initializing Firebase:', error.message);
-    console.error('Make sure firebase-admin-key.json exists in the root directory');
     throw error;
   }
 
   return admin;
 }
-
 // Get Firestore instance
 function getFirestore() {
   if (!firebaseInitialized) {
