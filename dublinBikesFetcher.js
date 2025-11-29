@@ -99,7 +99,7 @@ async function fetchDublinBikes() {
  */
 function startDublinBikesFetcher() {
   console.log('🕐 Starting Dublin Bikes fetcher...');
-  console.log('📅 Schedule: Every 5 minutes');
+  console.log('📅 Schedule: Every 2 minutes');
   
   // Fetch immediately on start
   fetchDublinBikes()
@@ -113,7 +113,7 @@ function startDublinBikesFetcher() {
   
   // Schedule to run every 5 minutes
   // Cron format: '*/5 * * * *' means "every 5 minutes"
-  const task = cron.schedule('*/5 * * * *', async () => {
+  const task = cron.schedule('*/2 * * * *', async () => {
     console.log('\n⏰ Scheduled fetch triggered at', new Date().toISOString());
     await fetchDublinBikes();
   });
