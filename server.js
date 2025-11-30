@@ -357,12 +357,21 @@ app.post('/api/data', requireAuth, async (req, res) => {
     const classifiedData = classifyDataBatch(sensorData);
     
     // Add userId and sessionId to each point
-    const enrichedData = classifiedData.map(point => ({
-      ...point,
-      userId: req.user.uid,
-      sessionId: sessionId,
-      receivedAt: admin.firestore.FieldValue.serverTimestamp()
-    }));
+    // Remove undefined fields to prevent Firestore errors
+    const enrichedData = classifiedData.map(point => {
+      const cleanPoint = {};
+      Object.keys(point).forEach(key => {
+        if (point[key] !== undefined && point[key] !== null) {
+          cleanPoint[key] = point[key];
+        }
+      });
+      return {
+        ...cleanPoint,
+        userId: req.user.uid,
+        sessionId: sessionId,
+        receivedAt: admin.firestore.FieldValue.serverTimestamp()
+      };
+    });
     
     // Save to Firestore
     const db = admin.firestore();
