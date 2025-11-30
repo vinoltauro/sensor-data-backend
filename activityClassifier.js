@@ -291,9 +291,85 @@ function classifyDataBatch(dataPoints) {
 }
 
 /**
+ * Count steps from accelerometer data
+ */
+function countSteps(dataPoints) {
+  if (!dataPoints || dataPoints.length < 10) return 0;
+  
+  let steps = 0;
+  let lastPeakTime = 0;
+  
+  // Thresholds
+  const peakThreshold = 10.5; // m/s² - minimum magnitude to be a step
+  const minTimeBetweenSteps = 300; // ms - max ~200 steps/min
+  
+  for (let i = 2; i < dataPoints.length - 2; i++) {
+    const current = dataPoints[i].accel_magnitude || 0;
+    const prev = dataPoints[i - 1].accel_magnitude || 0;
+    const next = dataPoints[i + 1].accel_magnitude || 0;
+    const currentTime = dataPoints[i].timestamp;
+    
+    // Detect peak: current is local maximum and above threshold
+    if (current > peakThreshold &&
+        current > prev && 
+        current > next &&
+        (currentTime - lastPeakTime) > minTimeBetweenSteps) {
+      
+      // Additional validation: check if it's a sharp peak
+      const prev2 = dataPoints[i - 2].accel_magnitude || 0;
+      const next2 = dataPoints[i + 2].accel_magnitude || 0;
+      
+      if (current > prev2 && current > next2) {
+        steps++;
+        lastPeakTime = currentTime;
+      }
+    }
+  }
+  
+  return steps;
+}
+
+/**
+ * Calculate pace (min/km) from distance and duration
+ */
+function calculatePace(distanceKm, durationSeconds) {
+  if (distanceKm <= 0 || durationSeconds <= 0) return null;
+  
+  const paceMinPerKm = (durationSeconds / 60) / distanceKm;
+  const minutes = Math.floor(paceMinPerKm);
+  const seconds = Math.round((paceMinPerKm - minutes) * 60);
+  
+  return {
+    value: paceMinPerKm,
+    display: `${minutes}:${seconds.toString().padStart(2, '0')}`
+  };
+}
+
+/**
+ * Estimate calories burned
+ */
+function estimateCalories(steps, distanceKm, durationMinutes, userWeight = 70) {
+  // Multiple methods, use average
+  
+  // Method 1: Based on steps
+  const caloriesFromSteps = steps * 0.04 * (userWeight / 70);
+  
+  // Method 2: Based on distance
+  const caloriesFromDistance = distanceKm * userWeight * 0.75;
+  
+  // Method 3: Based on MET (Metabolic Equivalent)
+  // Walking ~3.5 MET, Running ~8 MET
+  const avgMET = 5; // Mixed activity
+  const caloriesFromMET = (avgMET * userWeight * durationMinutes) / 60;
+  
+  // Average of all methods
+  return Math.round((caloriesFromSteps + caloriesFromDistance + caloriesFromMET) / 3);
+}
+
+/**
  * Summarize activities for a session
  */
-function summarizeSession(dataPoints) {
+function summarizeSession(dataPoints, distanceKm = 0) {
   const activityCounts = {};
   const activityDurations = {};
   let totalPoints = dataPoints.length;
@@ -323,17 +399,37 @@ function summarizeSession(dataPoints) {
   const primaryActivity = Object.entries(activityCounts)
     .sort((a, b) => b[1] - a[1])[0];
   
+  // Count steps
+  const steps = countSteps(dataPoints);
+  
+  // Calculate total duration
+  const totalDuration = Math.round(totalPoints * samplingInterval);
+  const totalDurationMinutes = (totalDuration / 60);
+  
+  // Calculate pace if we have distance
+  const pace = distanceKm > 0 ? calculatePace(distanceKm, totalDuration) : null;
+  
+  // Estimate calories
+  const calories = estimateCalories(steps, distanceKm, totalDurationMinutes);
+  
   return {
     summary: summary,
     primaryActivity: primaryActivity ? primaryActivity[0] : 'unknown',
     totalDataPoints: totalPoints,
-    totalDuration: Math.round(totalPoints * samplingInterval),
-    totalDurationMinutes: ((totalPoints * samplingInterval) / 60).toFixed(1)
+    totalDuration: totalDuration,
+    totalDurationMinutes: totalDurationMinutes.toFixed(1),
+    steps: steps,
+    pace: pace,
+    calories: calories,
+    distanceKm: distanceKm
   };
 }
 
 module.exports = {
   ActivityClassifier,
   classifyDataBatch,
-  summarizeSession
+  summarizeSession,
+  countSteps,
+  calculatePace,
+  estimateCalories
 };
