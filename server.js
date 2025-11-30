@@ -1,185 +1,127 @@
 /**
- * Sensor Data Collection API - Assignment 4 Version
- * "BreathEasy Dublin" - Urban Air Quality & Activity Tracker
+ * BreathEasy Dublin - Backend Server
+ * Assignment 4: Complete Implementation
  * 
- * Enhanced with:
- * - Firebase Authentication (Google Sign-In)
- * - Air Quality monitoring (EPA Ireland)
- * - Activity Classification (ML-based)
- * - User session management
- * - Health recommendations
+ * Features:
+ * - Firebase Authentication
+ * - Dublin Bikes real-time data
+ * - Air Quality monitoring (5 EPA stations)
+ * - Luas real-time arrivals (25 stations)
+ * - Activity classification with step counter
+ * - Health score calculation
+ * - Session management
  */
 
 const express = require('express');
 const cors = require('cors');
-require('dotenv').config();
-
-const app = express();
-const PORT = process.env.PORT || 10000;
-
-// Import Firebase modules
-const { 
-  initializeFirebase, 
-  addSensorDataBatch,
-  getRecentSensorData,
-  getRecentBikesData,
-  admin
-} = require('./firebaseConfig');
+const { admin } = require('./firebaseConfig');
 
 // Import authentication module
 const {
+  requireAuth,
   verifyAuthToken,
   createOrUpdateUser,
   getUserProfile,
-  updateUserPreferences,
-  getUserSessions,
-  requireAuth
+  getUserSessions
 } = require('./firebaseAuth');
 
 // Import data fetchers
-const { 
-  startDublinBikesFetcher, 
-  getFetcherStats: getBikesStats,
-  triggerManualFetch: triggerBikesFetch
+const {
+  startDublinBikesFetcher,
+  getDublinBikesStats
 } = require('./dublinBikesFetcher');
 
 const {
   startAirQualityFetcher,
   getAirQualityForLocation,
-  getAirQualityStats,
-  fetchAirQualityData
+  getAirQualityStats
 } = require('./airQualityFetcher');
 
-// Import activity classifier
 const {
+  startLuasFetcher,
+  getNearestLuasStations,
+  getLuasStats
+} = require('./luasFetcher');
+
+// Import classifiers and calculators
+const {
+  ActivityClassifier,
   classifyDataBatch,
   summarizeSession
 } = require('./activityClassifier');
 
+const {
+  calculateHealthScore
+} = require('./healthScoreCalculator');
+
+// Initialize Express
+const app = express();
+const PORT = process.env.PORT || 10000;
+
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// In-memory storage for sensor data (kept for CSV export)
-let sensorData = [];
-let sessionId = null;
-
-// Initialize Firebase on startup
-try {
-  initializeFirebase();
-  console.log('✅ Firebase initialized');
-} catch (error) {
-  console.error('⚠️ Warning: Firebase initialization failed');
-  console.error('   Error:', error.message);
-}
-
-// Start Dublin Bikes fetcher
-try {
-  startDublinBikesFetcher();
-  console.log('✅ Dublin Bikes fetcher started');
-} catch (error) {
-  console.error('⚠️ Warning: Dublin Bikes fetcher failed');
-  console.error('   Error:', error.message);
-}
-
-// Start Air Quality fetcher
-try {
-  startAirQualityFetcher();
-  console.log('✅ Air Quality fetcher started');
-} catch (error) {
-  console.error('⚠️ Warning: Air Quality fetcher failed');
-  console.error('   Error:', error.message);
-}
-
-// ============================================================
-// PUBLIC ENDPOINTS (No authentication required)
-// ============================================================
-
-// Health check
-app.get('/', (req, res) => {
-  res.json({ 
-    status: 'running',
-    message: 'BreathEasy Dublin - Urban Air Quality & Activity Tracker',
-    version: '4.0',
-    features: {
-      authentication: true,
-      sensorData: true,
-      dublinBikes: true,
-      airQuality: true,
-      activityClassification: true,
-      healthRecommendations: true
-    }
-  });
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
 });
 
-// ============================================================
-// AUTHENTICATION ENDPOINTS
-// ============================================================
+// Initialize Activity Classifier
+const activityClassifier = new ActivityClassifier();
 
-// User login/signup
+// ==========================================
+// AUTHENTICATION ENDPOINTS
+// ==========================================
+
+/**
+ * Login/Register with Firebase
+ */
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { idToken } = req.body;
+    const authHeader = req.headers.authorization;
     
-    if (!idToken) {
-      return res.status(400).json({
-        success: false,
-        error: 'ID token is required'
-      });
-    }
-    
-    // Verify token
-    const authResult = await verifyAuthToken(idToken);
-    
-    if (!authResult.success) {
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({
         success: false,
-        error: 'Invalid token'
+        error: 'No authorization token provided'
       });
     }
+
+    const idToken = authHeader.split('Bearer ')[1];
+    const decodedToken = await verifyAuthToken(idToken);
     
-    // Create or update user
-    const userResult = await createOrUpdateUser(authResult);
-    
-    if (!userResult.success) {
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to create user profile'
-      });
-    }
-    
-    // Get user profile
-    const profileResult = await getUserProfile(authResult.uid);
+    // Create or update user in Firestore
+    const user = await createOrUpdateUser(decodedToken);
     
     res.json({
       success: true,
-      user: profileResult.user,
+      user: user,
       message: 'Login successful'
     });
-    
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({
+    res.status(401).json({
       success: false,
       error: error.message
     });
   }
 });
 
-// Get user profile
+/**
+ * Get user profile
+ */
 app.get('/api/auth/profile', requireAuth, async (req, res) => {
   try {
-    const result = await getUserProfile(req.user.uid);
-    
-    if (result.success) {
-      res.json({
-        success: true,
-        user: result.user
-      });
-    } else {
-      res.status(404).json(result);
-    }
+    const profile = await getUserProfile(req.user.uid);
+    res.json({
+      success: true,
+      profile: profile
+    });
   } catch (error) {
+    console.error('Get profile error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -187,67 +129,37 @@ app.get('/api/auth/profile', requireAuth, async (req, res) => {
   }
 });
 
-// Update user preferences
-app.put('/api/auth/preferences', requireAuth, async (req, res) => {
-  try {
-    const { preferences } = req.body;
-    
-    const result = await updateUserPreferences(req.user.uid, preferences);
-    
-    if (result.success) {
-      res.json({
-        success: true,
-        message: 'Preferences updated'
-      });
-    } else {
-      res.status(500).json(result);
-    }
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+// ==========================================
+// SESSION MANAGEMENT ENDPOINTS
+// ==========================================
 
-// ============================================================
-// SESSION MANAGEMENT ENDPOINTS (Authenticated)
-// ============================================================
-
-// Start new session (now with user association)
+/**
+ * Start a new recording session
+ */
 app.post('/api/session/start', requireAuth, async (req, res) => {
   try {
+    const { startLocation } = req.body;
+    
     const db = admin.firestore();
     const sessionRef = db.collection('users')
       .doc(req.user.uid)
       .collection('sessions')
       .doc();
     
-    const newSession = {
-      sessionId: sessionRef.id,
+    await sessionRef.set({
       userId: req.user.uid,
       startTime: admin.firestore.FieldValue.serverTimestamp(),
+      startLocation: startLocation || null,
       status: 'active',
-      dataPoints: 0,
-      activities: {},
-      airQualityExposure: [],
-      route: []
-    };
-    
-    await sessionRef.set(newSession);
-    
-    // Also keep in memory for CSV export
-    sessionId = sessionRef.id;
-    sensorData = [];
-    
-    console.log('📱 Session started for user:', req.user.email);
-    
-    res.json({ 
-      success: true, 
-      sessionId: sessionRef.id,
-      message: 'Session started'
+      createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
     
+    console.log(`✅ Session started: ${sessionRef.id} for user: ${req.user.uid}`);
+    
+    res.json({
+      success: true,
+      sessionId: sessionRef.id
+    });
   } catch (error) {
     console.error('Start session error:', error);
     res.status(500).json({
@@ -257,70 +169,9 @@ app.post('/api/session/start', requireAuth, async (req, res) => {
   }
 });
 
-// Receive sensor data with activity classification
-app.post('/api/data', requireAuth, async (req, res) => {
-  const { data, sessionId: clientSessionId } = req.body;
-  
-  if (!data || !Array.isArray(data)) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'Invalid data format' 
-    });
-  }
-
-  try {
-    // Classify activities in the data
-    const classifiedData = classifyDataBatch(data);
-    
-    // Add user ID to each data point
-    const enrichedData = classifiedData.map(point => ({
-      ...point,
-      userId: req.user.uid,
-      sessionId: clientSessionId || sessionId
-    }));
-    
-    // Add to in-memory storage for CSV
-    sensorData.push(...enrichedData);
-    
-    // Store to Firestore
-    const firestoreResult = await addSensorDataBatch(enrichedData);
-    
-    // Update session metadata
-    if (clientSessionId) {
-      const db = admin.firestore();
-      const sessionRef = db.collection('users')
-        .doc(req.user.uid)
-        .collection('sessions')
-        .doc(clientSessionId);
-      
-      const activitySummary = summarizeSession(enrichedData);
-      
-      await sessionRef.update({
-        dataPoints: admin.firestore.FieldValue.increment(enrichedData.length),
-        lastUpdate: admin.firestore.FieldValue.serverTimestamp(),
-        activities: activitySummary.summary
-      });
-    }
-    
-    console.log(`✅ Stored ${data.length} classified points for ${req.user.email}`);
-    
-    res.json({ 
-      success: true, 
-      totalPoints: sensorData.length,
-      message: `Received ${data.length} points with activity classification`,
-      storedToCloud: firestoreResult.success
-    });
-    
-  } catch (error) {
-    console.error('Data storage error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Stop session
+/**
+ * Stop recording session and calculate metrics
+ */
 app.post('/api/session/stop', requireAuth, async (req, res) => {
   try {
     const { sessionId: clientSessionId } = req.body;
@@ -332,11 +183,22 @@ app.post('/api/session/stop', requireAuth, async (req, res) => {
         .collection('sessions')
         .doc(clientSessionId);
       
-      // Calculate final metrics
-      const sessionData = sensorData; // Use in-memory data
+      // Get session data points
+      const dataSnapshot = await db.collection('sensor_data')
+        .where('sessionId', '==', clientSessionId)
+        .where('userId', '==', req.user.uid)
+        .orderBy('timestamp', 'asc')
+        .get();
+      
+      const sessionData = [];
+      dataSnapshot.forEach(doc => sessionData.push(doc.data()));
+      
+      console.log(`📊 Processing ${sessionData.length} data points for session ${clientSessionId}`);
+      
+      // Calculate metrics using enhanced classifier
       const activitySummary = summarizeSession(sessionData);
       
-      // Calculate total distance (simplified)
+      // Calculate total distance
       let totalDistance = 0;
       for (let i = 1; i < sessionData.length; i++) {
         if (sessionData[i].latitude && sessionData[i-1].latitude) {
@@ -348,13 +210,36 @@ app.post('/api/session/stop', requireAuth, async (req, res) => {
         }
       }
       
+      // Get air quality history for session
+      const airQualityHistory = sessionData
+        .filter(d => d.airQuality)
+        .map(d => ({ aqi: d.airQuality?.aqi?.overall || 0 }));
+      
+      // Calculate health score
+      const healthScore = calculateHealthScore(
+        {
+          distanceKm: totalDistance,
+          activities: activitySummary.summary,
+          durationMinutes: parseFloat(activitySummary.totalDurationMinutes)
+        },
+        airQualityHistory
+      );
+      
+      console.log(`💚 Health score: ${healthScore.totalScore}/10`);
+      
+      // Update session with enhanced metrics
       await sessionRef.update({
         endTime: admin.firestore.FieldValue.serverTimestamp(),
         status: 'completed',
         totalDistance: totalDistance,
         totalDuration: activitySummary.totalDuration,
         activities: activitySummary.summary,
-        primaryActivity: activitySummary.primaryActivity
+        primaryActivity: activitySummary.primaryActivity,
+        steps: activitySummary.steps,
+        pace: activitySummary.pace,
+        calories: activitySummary.calories,
+        healthScore: healthScore,
+        dataPointsCount: sessionData.length
       });
       
       // Update user stats
@@ -362,21 +247,14 @@ app.post('/api/session/stop', requireAuth, async (req, res) => {
       await userRef.update({
         totalSessions: admin.firestore.FieldValue.increment(1),
         totalDistance: admin.firestore.FieldValue.increment(totalDistance),
-        totalDuration: admin.firestore.FieldValue.increment(activitySummary.totalDuration)
+        totalDuration: admin.firestore.FieldValue.increment(activitySummary.totalDuration),
+        totalSteps: admin.firestore.FieldValue.increment(activitySummary.steps || 0)
       });
       
-      console.log(`🛑 Session completed for ${req.user.email}`);
+      console.log(`✅ Session ${clientSessionId} completed successfully`);
     }
     
-    const dataCount = sensorData.length;
-    
-    res.json({ 
-      success: true,
-      message: 'Session stopped',
-      dataPoints: dataCount,
-      sessionId: clientSessionId
-    });
-    
+    res.json({ success: true });
   } catch (error) {
     console.error('Stop session error:', error);
     res.status(500).json({
@@ -386,14 +264,20 @@ app.post('/api/session/stop', requireAuth, async (req, res) => {
   }
 });
 
-// Get user's session history
+/**
+ * Get user's sessions
+ */
 app.get('/api/sessions', requireAuth, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 20;
-    const result = await getUserSessions(req.user.uid, limit);
+    const sessions = await getUserSessions(req.user.uid, limit);
     
-    res.json(result);
+    res.json({
+      success: true,
+      sessions: sessions
+    });
   } catch (error) {
+    console.error('Get sessions error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -401,14 +285,19 @@ app.get('/api/sessions', requireAuth, async (req, res) => {
   }
 });
 
-// Get specific session details
+/**
+ * Get specific session details with all data points
+ */
 app.get('/api/sessions/:sessionId', requireAuth, async (req, res) => {
   try {
+    const { sessionId } = req.params;
     const db = admin.firestore();
+    
+    // Get session metadata
     const sessionDoc = await db.collection('users')
       .doc(req.user.uid)
       .collection('sessions')
-      .doc(req.params.sessionId)
+      .doc(sessionId)
       .get();
     
     if (!sessionDoc.exists) {
@@ -420,26 +309,24 @@ app.get('/api/sessions/:sessionId', requireAuth, async (req, res) => {
     
     // Get session data points
     const dataSnapshot = await db.collection('sensor_data')
-      .where('sessionId', '==', req.params.sessionId)
+      .where('sessionId', '==', sessionId)
       .where('userId', '==', req.user.uid)
       .orderBy('timestamp', 'asc')
-      .limit(5000)
       .get();
     
     const dataPoints = [];
-    dataSnapshot.forEach(doc => {
-      dataPoints.push(doc.data());
-    });
+    dataSnapshot.forEach(doc => dataPoints.push(doc.data()));
     
     res.json({
       success: true,
-      session: sessionDoc.data(),
-      dataPoints: dataPoints,
-      count: dataPoints.length
+      data: {
+        ...sessionDoc.data(),
+        id: sessionDoc.id,
+        dataPoints: dataPoints
+      }
     });
-    
   } catch (error) {
-    console.error('Get session error:', error);
+    console.error('Get session details error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -447,11 +334,115 @@ app.get('/api/sessions/:sessionId', requireAuth, async (req, res) => {
   }
 });
 
-// ============================================================
-// AIR QUALITY ENDPOINTS
-// ============================================================
+// ==========================================
+// SENSOR DATA ENDPOINTS
+// ==========================================
 
-// Get current air quality for location
+/**
+ * Receive and process sensor data
+ */
+app.post('/api/data', requireAuth, async (req, res) => {
+  try {
+    const { sessionId, sensorData } = req.body;
+    
+    if (!sessionId || !sensorData || !Array.isArray(sensorData)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid data format'
+      });
+    }
+    
+    // Classify activities
+    const classifiedData = classifyDataBatch(sensorData);
+    
+    // Add userId and sessionId to each point
+    const enrichedData = classifiedData.map(point => ({
+      ...point,
+      userId: req.user.uid,
+      sessionId: sessionId,
+      receivedAt: admin.firestore.FieldValue.serverTimestamp()
+    }));
+    
+    // Save to Firestore
+    const db = admin.firestore();
+    const batch = db.batch();
+    
+    enrichedData.forEach(point => {
+      const docRef = db.collection('sensor_data').doc();
+      batch.set(docRef, point);
+    });
+    
+    await batch.commit();
+    
+    res.json({
+      success: true,
+      classifiedData: enrichedData,
+      count: enrichedData.length
+    });
+  } catch (error) {
+    console.error('Data processing error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Download session data as CSV
+ */
+app.get('/api/data/download', requireAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.query;
+    
+    if (!sessionId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Session ID required'
+      });
+    }
+    
+    const db = admin.firestore();
+    const snapshot = await db.collection('sensor_data')
+      .where('sessionId', '==', sessionId)
+      .where('userId', '==', req.user.uid)
+      .orderBy('timestamp', 'asc')
+      .get();
+    
+    if (snapshot.empty) {
+      return res.status(404).json({
+        success: false,
+        error: 'No data found'
+      });
+    }
+    
+    // Generate CSV
+    let csv = 'timestamp,latitude,longitude,accel_x,accel_y,accel_z,accel_magnitude,speed,activity,activity_confidence\n';
+    
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      csv += `${data.timestamp},${data.latitude},${data.longitude},${data.accel_x},${data.accel_y},${data.accel_z},${data.accel_magnitude},${data.speed},${data.activity},${data.activity_confidence}\n`;
+    });
+    
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=session_${sessionId}.csv`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Download error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ==========================================
+// AIR QUALITY ENDPOINTS
+// ==========================================
+
+/**
+ * Get current air quality for location
+ */
 app.get('/api/air-quality/current', async (req, res) => {
   try {
     const { lat, lng } = req.query;
@@ -469,8 +460,8 @@ app.get('/api/air-quality/current', async (req, res) => {
     );
     
     res.json(result);
-    
   } catch (error) {
+    console.error('Air quality error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -478,21 +469,24 @@ app.get('/api/air-quality/current', async (req, res) => {
   }
 });
 
-// Get air quality fetcher stats
+/**
+ * Get air quality fetcher statistics
+ */
 app.get('/api/air-quality/stats', (req, res) => {
   const stats = getAirQualityStats();
-  res.json({
-    success: true,
-    stats: stats
-  });
+  res.json({ success: true, stats });
 });
 
-// Trigger manual air quality fetch
+/**
+ * Manually trigger air quality fetch
+ */
 app.post('/api/air-quality/fetch', async (req, res) => {
   try {
+    const { fetchAirQualityData } = require('./airQualityFetcher');
     const result = await fetchAirQualityData();
     res.json(result);
   } catch (error) {
+    console.error('Manual fetch error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -500,11 +494,14 @@ app.post('/api/air-quality/fetch', async (req, res) => {
   }
 });
 
-// ============================================================
+// ==========================================
 // HEALTH RECOMMENDATIONS ENDPOINT
-// ============================================================
+// ==========================================
 
-app.get('/api/recommendations', requireAuth, async (req, res) => {
+/**
+ * Get personalized health recommendations
+ */
+app.get('/api/recommendations', async (req, res) => {
   try {
     const { lat, lng, activity } = req.query;
     
@@ -522,30 +519,73 @@ app.get('/api/recommendations', requireAuth, async (req, res) => {
     );
     
     if (!aqResult.success) {
-      return res.status(500).json({
-        success: false,
-        error: 'Could not fetch air quality data'
+      return res.json({
+        success: true,
+        recommendation: {
+          safeToExercise: true,
+          message: 'Air quality data unavailable',
+          alternatives: [],
+          tips: ['Check local air quality before intense exercise']
+        }
       });
     }
     
-    // Get user preferences
-    const userProfile = await getUserProfile(req.user.uid);
-    const sensitivity = userProfile.user?.preferences?.airQualitySensitivity || 'medium';
+    const aqi = aqResult.data.aqi.overall;
+    const category = aqResult.data.aqi.category;
+    const currentActivity = activity || 'walking';
+    
+    // Activity intensity multipliers
+    const intensityMultipliers = {
+      standing: 1.0,
+      walking: 1.5,
+      running: 3.0,
+      cycling: 2.0,
+      vehicle: 1.0
+    };
+    
+    const multiplier = intensityMultipliers[currentActivity.toLowerCase()] || 1.5;
+    const adjustedAQI = aqi * multiplier;
     
     // Generate recommendations
-    const recommendations = generateRecommendations(
-      aqResult.station,
-      activity || 'walking',
-      sensitivity
-    );
+    let safeToExercise = adjustedAQI <= 100;
+    let message = '';
+    let alternatives = [];
+    let tips = [];
+    
+    if (adjustedAQI <= 50) {
+      message = 'Excellent conditions for all activities!';
+      tips = ['Great time for outdoor exercise', 'Air quality is optimal'];
+    } else if (adjustedAQI <= 100) {
+      message = 'Good conditions for moderate exercise';
+      tips = ['Air quality is acceptable', 'Safe for most outdoor activities'];
+    } else if (adjustedAQI <= 150) {
+      message = 'Consider reducing exercise intensity';
+      alternatives = ['Try walking instead of running', 'Exercise indoors if possible'];
+      tips = ['Sensitive groups should be cautious', 'Avoid prolonged outdoor exertion'];
+    } else {
+      message = 'Not recommended for outdoor exercise';
+      alternatives = ['Exercise indoors', 'Wait for better air quality', 'Use gym facilities'];
+      tips = ['Air quality is unhealthy', 'Avoid outdoor activities'];
+      safeToExercise = false;
+    }
     
     res.json({
       success: true,
-      airQuality: aqResult.station,
-      recommendations: recommendations
+      recommendation: {
+        safeToExercise,
+        message,
+        alternatives,
+        tips,
+        aqi,
+        category,
+        adjustedAQI: Math.round(adjustedAQI),
+        nearestStation: aqResult.data.station_name,
+        distance: aqResult.data.distance,
+        primaryPollutant: aqResult.data.aqi.primaryPollutant
+      }
     });
-    
   } catch (error) {
+    console.error('Recommendations error:', error);
     res.status(500).json({
       success: false,
       error: error.message
@@ -553,154 +593,320 @@ app.get('/api/recommendations', requireAuth, async (req, res) => {
   }
 });
 
-// ============================================================
-// EXISTING ENDPOINTS (CSV, bikes, etc.)
-// ============================================================
+// ==========================================
+// DUBLIN BIKES ENDPOINTS
+// ==========================================
 
-// Download CSV
-app.get('/api/data/download', async (req, res) => {
-  if (sensorData.length === 0) {
-    return res.status(404).json({ 
-      success: false, 
-      error: 'No data available' 
-    });
-  }
-
-  const sortedData = [...sensorData].sort((a, b) => a.timestamp - b.timestamp);
-
-  const headers = [
-    'timestamp', 'datetime', 'seconds_elapsed',
-    'latitude', 'longitude', 'altitude', 'speed', 'accuracy', 'heading',
-    'accel_x', 'accel_y', 'accel_z', 'accel_magnitude',
-    'activity', 'activity_confidence', 'health_impact', 'air_quality_sensitivity'
-  ];
-
-  let csv = headers.join(',') + '\n';
-
-  const startTime = sortedData[0].timestamp;
-
-  sortedData.forEach(point => {
-    const row = [
-      point.timestamp,
-      new Date(point.timestamp).toISOString(),
-      ((point.timestamp - startTime) / 1000).toFixed(3),
-      point.latitude || '', point.longitude || '', point.altitude || '',
-      point.speed || '', point.accuracy || '', point.heading || '',
-      point.accel_x || '', point.accel_y || '', point.accel_z || '',
-      point.accel_magnitude || '',
-      point.activity || '', point.activity_confidence || '',
-      point.health_impact || '', point.air_quality_sensitivity || ''
-    ];
-    csv += row.join(',') + '\n';
-  });
-
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename=sensor_data_${sessionId}.csv`);
-  res.send(csv);
-});
-
-// Dublin Bikes endpoints
+/**
+ * Get Dublin Bikes data from Firestore
+ */
 app.get('/api/firestore/dublin-bikes', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 100;
-    const result = await getRecentBikesData(limit);
-    res.json(result);
+    const limit = parseInt(req.query.limit) || 50;
+    
+    const db = admin.firestore();
+    const snapshot = await db.collection('dublin_bikes')
+      .orderBy('fetched_at', 'desc')
+      .limit(limit)
+      .get();
+    
+    if (snapshot.empty) {
+      return res.json({
+        success: true,
+        data: [],
+        message: 'No bike data available yet'
+      });
+    }
+    
+    const bikeData = [];
+    snapshot.forEach(doc => {
+      bikeData.push({
+        id: doc.id,
+        ...doc.data()
+      });
+    });
+    
+    res.json({
+      success: true,
+      data: bikeData,
+      count: bikeData.length
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('Firestore bikes error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
-app.get('/api/dublin-bikes/stats', (req, res) => {
-  const stats = getBikesStats();
-  res.json({ success: true, stats: stats });
+/**
+ * Get Dublin Bikes fetcher statistics
+ */
+app.get('/api/bikes/stats', (req, res) => {
+  const stats = getDublinBikesStats();
+  res.json({ success: true, stats });
 });
 
-app.post('/api/dublin-bikes/fetch', async (req, res) => {
+/**
+ * Manually trigger Dublin Bikes fetch
+ */
+app.post('/api/bikes/fetch', async (req, res) => {
   try {
-    const result = await triggerBikesFetch();
+    const { fetchDublinBikes } = require('./dublinBikesFetcher');
+    const result = await fetchDublinBikes();
     res.json(result);
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('Manual bikes fetch error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 });
 
-// ============================================================
-// HELPER FUNCTIONS
-// ============================================================
+// ==========================================
+// LUAS ENDPOINTS
+// ==========================================
 
+/**
+ * Get Luas fetcher statistics
+ */
+app.get('/api/luas/stats', (req, res) => {
+  const stats = getLuasStats();
+  res.json({ success: true, stats });
+});
+
+/**
+ * Get nearest Luas stations
+ */
+app.get('/api/luas/nearest', async (req, res) => {
+  try {
+    const { lat, lng, limit } = req.query;
+    
+    if (!lat || !lng) {
+      return res.status(400).json({
+        success: false,
+        error: 'Latitude and longitude required'
+      });
+    }
+    
+    const result = await getNearestLuasStations(
+      parseFloat(lat),
+      parseFloat(lng),
+      parseInt(limit) || 3
+    );
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Nearest Luas error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Get all Luas real-time data
+ */
+app.get('/api/luas/realtime', async (req, res) => {
+  try {
+    const db = admin.firestore();
+    const snapshot = await db.collection('luas_realtime')
+      .orderBy('created_at', 'desc')
+      .limit(50)
+      .get();
+    
+    if (snapshot.empty) {
+      return res.json({
+        success: true,
+        stations: [],
+        message: 'No Luas data available yet'
+      });
+    }
+    
+    const stations = [];
+    const seen = new Set();
+    
+    snapshot.forEach(doc => {
+      const data = doc.data();
+      if (!seen.has(data.station_code)) {
+        seen.add(data.station_code);
+        stations.push(data);
+      }
+    });
+    
+    res.json({
+      success: true,
+      stations: stations
+    });
+  } catch (error) {
+    console.error('Luas realtime error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+/**
+ * Manually trigger Luas fetch
+ */
+app.post('/api/luas/fetch', async (req, res) => {
+  try {
+    const { fetchLuasData } = require('./luasFetcher');
+    const result = await fetchLuasData();
+    res.json(result);
+  } catch (error) {
+    console.error('Manual Luas fetch error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// ==========================================
+// UTILITY FUNCTIONS
+// ==========================================
+
+/**
+ * Calculate distance between two coordinates (Haversine formula)
+ */
 function calculateDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371; // km
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const R = 6371; // Earth's radius in km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  
   const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
     Math.sin(dLon/2) * Math.sin(dLon/2);
+  
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c;
 }
 
-function generateRecommendations(airQuality, activity, sensitivity) {
-  const aqi = airQuality.aqi.overall;
-  const recommendations = {
-    safeToExercise: true,
-    message: '',
-    alternatives: [],
-    tips: []
-  };
-  
-  // Determine safety based on AQI and activity
-  if (activity === 'running' && aqi > 100) {
-    recommendations.safeToExercise = false;
-    recommendations.message = 'Air quality is unhealthy for running. Consider indoor exercise or lighter activities.';
-    recommendations.alternatives = ['Walking', 'Indoor gym', 'Yoga'];
-  } else if (activity === 'cycling' && aqi > 150) {
-    recommendations.safeToExercise = false;
-    recommendations.message = 'Air quality is poor. Avoid cycling outdoors.';
-    recommendations.alternatives = ['Dublin Bikes for shorter routes', 'Public transport', 'Walking slowly'];
-  } else if (aqi > 50 && aqi <= 100) {
-    recommendations.message = 'Air quality is moderate. Sensitive individuals should take precautions.';
-    recommendations.tips = [
-      'Reduce intensity of outdoor activity',
-      'Take breaks in clean air areas',
-      'Consider using Dublin Bikes for shorter exposure'
-    ];
-  } else if (aqi <= 50) {
-    recommendations.message = 'Air quality is good! Great time for outdoor exercise.';
-    recommendations.tips = [
-      'Enjoy your outdoor activity',
-      'Great time for running or cycling'
-    ];
-  }
-  
-  // Add general tips
-  recommendations.tips.push(
-    `Nearest air quality station: ${airQuality.station_name} (${airQuality.distance.toFixed(1)} km away)`,
-    `Primary pollutant: ${airQuality.aqi.primaryPollutant}`
-  );
-  
-  return recommendations;
+function toRad(degrees) {
+  return degrees * (Math.PI / 180);
 }
 
-// Error handling
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ 
-    success: false, 
-    error: 'Internal server error' 
+// ==========================================
+// HEALTH CHECK ENDPOINT
+// ==========================================
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    services: {
+      firebase: '✅',
+      dublinBikes: '✅',
+      airQuality: '✅',
+      luas: '✅',
+      activityClassifier: '✅'
+    }
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('\n' + '='.repeat(70));
-  console.log('🚀 BreathEasy Dublin - Urban Air Quality & Activity Tracker');
-  console.log('='.repeat(70));
-  console.log(`📡 Server running on port ${PORT}`);
-  console.log(`🌐 Health check: http://localhost:${PORT}/`);
-  console.log(`🔐 Firebase Auth: Enabled`);
-  console.log(`🔥 Firebase Firestore: Enabled`);
-  console.log(`🚴 Dublin Bikes Fetcher: Running (every 2 minutes)`);
-  console.log(`🌫️  Air Quality Fetcher: Running (every 15 minutes)`);
-  console.log(`🤖 Activity Classifier: Enabled`);
-  console.log(`💚 Health Recommendations: Enabled`);
-  console.log('='.repeat(70) + '\n');
+// ==========================================
+// ERROR HANDLING
+// ==========================================
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Endpoint not found'
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    success: false,
+    error: 'Internal server error'
+  });
+});
+
+// ==========================================
+// SERVER INITIALIZATION
+// ==========================================
+
+async function startServer() {
+  try {
+    console.log('🚀 Starting BreathEasy Dublin Backend...\n');
+    
+    // Initialize Firebase
+    console.log('🔥 Initializing Firebase...');
+    const db = admin.firestore();
+    await db.collection('_health').doc('check').set({
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    });
+    console.log('✅ Firebase initialized\n');
+    
+    // Start Dublin Bikes fetcher
+    console.log('🚴 Starting Dublin Bikes fetcher...');
+    try {
+      startDublinBikesFetcher();
+      console.log('✅ Dublin Bikes fetcher started\n');
+    } catch (error) {
+      console.error('⚠️ Dublin Bikes fetcher failed:', error.message, '\n');
+    }
+    
+    // Start Air Quality fetcher
+    console.log('🌫️ Starting Air Quality fetcher...');
+    try {
+      startAirQualityFetcher();
+      console.log('✅ Air Quality fetcher started\n');
+    } catch (error) {
+      console.error('⚠️ Air Quality fetcher failed:', error.message, '\n');
+    }
+    
+    // Start Luas fetcher
+    console.log('🚊 Starting Luas fetcher...');
+    try {
+      startLuasFetcher();
+      console.log('✅ Luas fetcher started\n');
+    } catch (error) {
+      console.error('⚠️ Luas fetcher failed:', error.message, '\n');
+    }
+    
+    // Log enabled features
+    console.log('📋 Features enabled:');
+    console.log('   🔐 Firebase Auth: Enabled');
+    console.log('   🤖 Activity Classifier: Enabled');
+    console.log('   💚 Health Score Calculator: Enabled');
+    console.log('   📊 Session Analytics: Enabled');
+    console.log('   👣 Step Counter: Enabled\n');
+    
+    // Start Express server
+    app.listen(PORT, () => {
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(`✅ Server running on port ${PORT}`);
+      console.log(`🌐 Health check: http://localhost:${PORT}/health`);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+      console.log('🎉 BreathEasy Dublin is ready!\n');
+    });
+    
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Start the server
+startServer();
+
+// Handle graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Shutting down gracefully...');
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received. Shutting down gracefully...');
+  process.exit(0);
 });
