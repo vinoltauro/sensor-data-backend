@@ -196,9 +196,8 @@ app.post('/api/session/stop', requireAuth, async (req, res) => {
       console.log(`📊 Processing ${sessionData.length} data points for session ${clientSessionId}`);
       
       // Calculate metrics using enhanced classifier
-      const activitySummary = summarizeSession(sessionData);
       
-      // Calculate total distance
+      // Calculate total distance FIRST (needed for summarizeSession)
       let totalDistance = 0;
       for (let i = 1; i < sessionData.length; i++) {
         if (sessionData[i].latitude && sessionData[i-1].latitude) {
@@ -210,6 +209,8 @@ app.post('/api/session/stop', requireAuth, async (req, res) => {
         }
       }
       
+      // Calculate metrics using enhanced classifier (WITH distance parameter)
+      const activitySummary = summarizeSession(sessionData, totalDistance);
       // Get air quality history for session
       const airQualityHistory = sessionData
         .filter(d => d.airQuality)
