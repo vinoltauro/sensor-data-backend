@@ -103,13 +103,24 @@ class ActivityClassifier {
   /**
    * Estimate dominant frequency using simple peak detection
    */
+  /**
+    * Estimate dominant frequency using simple peak detection
+    */
   estimateFrequency(magnitudes) {
     if (magnitudes.length < 10) return 0;
+
+    // [NEW] Calculate dynamic threshold
+    // Peaks must be above the mean AND above 10.5 (gravity + noise margin)
+    // This prevents "Standing" jitter from counting as steps.
+    const avgMag = this.mean(magnitudes);
+    const minPeakHeight = Math.max(avgMag, 10.5);
 
     // Find peaks (local maxima)
     const peaks = [];
     for (let i = 1; i < magnitudes.length - 1; i++) {
-      if (magnitudes[i] > magnitudes[i - 1] && magnitudes[i] > magnitudes[i + 1]) {
+      if (magnitudes[i] > magnitudes[i - 1] &&
+        magnitudes[i] > magnitudes[i + 1] &&
+        magnitudes[i] > minPeakHeight) { // [NEW] Check height
         peaks.push(i);
       }
     }
@@ -123,7 +134,7 @@ class ActivityClassifier {
     }
 
     const avgInterval = this.mean(intervals);
-    const samplingRate = 10; // Hz (from your data collection)
+    const samplingRate = 10; // Hz (Correct for your frontend)
 
     // Frequency = samplingRate / avgInterval
     return avgInterval > 0 ? samplingRate / avgInterval : 0;
@@ -266,23 +277,44 @@ class ActivityClassifier {
 /**
  * Process sensor data batch and add activity classifications
  */
+/**
+ * Process sensor data batch and add activity classifications
+ */
 function classifyDataBatch(dataPoints) {
   const classifier = new ActivityClassifier();
-  const windowSize = 10; // Classify based on 10-point windows
+  const windowSize = 10;
+
+  // [NEW] Pre-process: Smooth data using Simple Moving Average (SMA)
+  // This removes high-frequency noise/spikes while keeping the motion trend.
+  const smoothedData = dataPoints.map((point, i, arr) => {
+    // Skip edges
+    if (i < 2 || i > arr.length - 3) return point;
+
+    // Average magnitude of current point + 2 neighbors on each side
+    const avgMag = (
+      (arr[i - 2].accel_magnitude || 0) +
+      (arr[i - 1].accel_magnitude || 0) +
+      (point.accel_magnitude || 0) +
+      (arr[i + 1].accel_magnitude || 0) +
+      (arr[i + 2].accel_magnitude || 0)
+    ) / 5;
+
+    return { ...point, accel_magnitude: avgMag };
+  });
+
   const results = [];
 
-  for (let i = 0; i < dataPoints.length; i++) {
-    // Get window of data around current point
+  for (let i = 0; i < smoothedData.length; i++) {
+    // Get window of data around current point (using SMOOTHED data)
     const windowStart = Math.max(0, i - Math.floor(windowSize / 2));
-    const windowEnd = Math.min(dataPoints.length, i + Math.ceil(windowSize / 2));
-    const window = dataPoints.slice(windowStart, windowEnd);
+    const windowEnd = Math.min(smoothedData.length, i + Math.ceil(windowSize / 2));
+    const window = smoothedData.slice(windowStart, windowEnd);
 
     // Classify activity
     const classification = classifier.classifyActivity(window);
 
-    // Add classification to data point
     results.push({
-      ...dataPoints[i],
+      ...dataPoints[i], // Keep original raw values for record
       activity: classification.activity,
       activity_confidence: classification.confidence,
       health_impact: classification.healthImpact,
@@ -378,7 +410,7 @@ function estimateCalories(steps, distanceKm, durationMinutes, userWeight = 70) {
 function summarizeSession(dataPoints, distanceKm = 0) {
   const activityCounts = {};
   let totalPoints = dataPoints.length;
-  
+
   if (totalPoints === 0) {
     return {
       summary: {},
@@ -398,7 +430,7 @@ function summarizeSession(dataPoints, distanceKm = 0) {
     const activity = point.activity || 'unknown';
     activityCounts[activity] = (activityCounts[activity] || 0) + 1;
   });
-  
+
   // [FIX] Calculate REAL duration from timestamps
   let totalDuration = 0;
   if (totalPoints > 1) {
@@ -412,13 +444,13 @@ function summarizeSession(dataPoints, distanceKm = 0) {
   // [FIX] Calculate dynamic sampling interval based on actual data
   // This allows the math to work for ANY sampling rate (1Hz, 10Hz, etc.)
   const samplingInterval = totalDuration > 0 ? totalDuration / totalPoints : 0;
-  
+
   const summary = {};
-  
+
   for (const [activity, count] of Object.entries(activityCounts)) {
     const percentage = (count / totalPoints) * 100;
     const duration = count * samplingInterval; // Distribute time proportionally
-    
+
     summary[activity] = {
       count: count,
       percentage: percentage.toFixed(1),
@@ -426,23 +458,23 @@ function summarizeSession(dataPoints, distanceKm = 0) {
       durationMinutes: (duration / 60).toFixed(1)
     };
   }
-  
+
   // Determine primary activity
   const primaryActivity = Object.entries(activityCounts)
     .sort((a, b) => b[1] - a[1])[0];
-  
+
   // Count steps
   const steps = countSteps(dataPoints);
-  
+
   // Calculate total duration in minutes
   const totalDurationMinutes = (totalDuration / 60);
-  
+
   // Calculate pace if we have distance
   const pace = distanceKm > 0 ? calculatePace(distanceKm, totalDuration) : null;
-  
+
   // Estimate calories
   const calories = estimateCalories(steps, distanceKm, totalDurationMinutes);
-  
+
   return {
     summary: summary,
     primaryActivity: primaryActivity ? primaryActivity[0] : 'unknown',
