@@ -1,17 +1,17 @@
 /**
  * Air Quality Data Fetcher
- * 
- * Fetches real-time air quality data for Dublin from EPA Ireland
+ * * Fetches real-time air quality data for Dublin from WAQI (World Air Quality Index)
  * Runs every 15 minutes and stores to Firebase Firestore
- * 
- * API: https://www.epa.ie/our-services/monitoring--assessment/assessment/air-quality/
+ * * API: https://aqicn.org/api/
  */
 
 const cron = require('node-cron');
+const axios = require('axios');
 const { admin } = require('./firebaseConfig');
 
-// EPA Ireland Air Quality API
-const EPA_API_BASE = 'https://airquality.ie/assets/php/get-monitor-results.php';
+// WAQI API Configuration
+const WAQI_TOKEN = '06b6b999608005535d5fad4dcc111b697ebc9c0e'; // User provided token
+const WAQI_API_BASE = 'https://api.waqi.info/feed';
 
 // Dublin monitoring stations with coordinates
 const DUBLIN_STATIONS = [
@@ -22,32 +22,14 @@ const DUBLIN_STATIONS = [
   { id: 'D08005', name: 'Blanchardstown', lat: 53.3892, lng: -6.3764 }
 ];
 
-// Air Quality Index thresholds (μg/m³)
+// Air Quality Index thresholds (Standard US EPA)
 const AQI_THRESHOLDS = {
-  PM2_5: {
-    good: 10,
-    moderate: 20,
-    unhealthySensitive: 25,
-    unhealthy: 50,
-    veryUnhealthy: 75,
-    hazardous: 100
-  },
-  PM10: {
-    good: 20,
-    moderate: 40,
-    unhealthySensitive: 50,
-    unhealthy: 100,
-    veryUnhealthy: 150,
-    hazardous: 200
-  },
-  NO2: {
-    good: 40,
-    moderate: 80,
-    unhealthySensitive: 100,
-    unhealthy: 200,
-    veryUnhealthy: 300,
-    hazardous: 400
-  }
+  good: 50,
+  moderate: 100,
+  unhealthySensitive: 150,
+  unhealthy: 200,
+  veryUnhealthy: 300,
+  hazardous: 500
 };
 
 let fetchCount = 0;
@@ -55,159 +37,126 @@ let lastFetchTime = null;
 let lastFetchStatus = 'Not started';
 
 /**
- * Calculate Air Quality Index category
+ * Helper: Get AQI Category and Color based on value
  */
-function calculateAQI(pollutant, value) {
-  const thresholds = AQI_THRESHOLDS[pollutant];
-  if (!thresholds || value === null || value === undefined) {
-    return { category: 'unknown', index: 0, color: '#999999' };
+function getAQIDetails(value) {
+  if (value === null || value === undefined) {
+    return { category: 'unknown', color: '#999999', message: 'Data unavailable' };
   }
   
-  let category, index, color, healthMessage;
-  
-  if (value <= thresholds.good) {
-    category = 'good';
-    index = Math.round((value / thresholds.good) * 50);
-    color = '#00E400';
-    healthMessage = 'Air quality is satisfactory';
-  } else if (value <= thresholds.moderate) {
-    category = 'moderate';
-    index = 50 + Math.round(((value - thresholds.good) / (thresholds.moderate - thresholds.good)) * 50);
-    color = '#FFFF00';
-    healthMessage = 'Acceptable for most people';
-  } else if (value <= thresholds.unhealthySensitive) {
-    category = 'unhealthy_sensitive';
-    index = 100 + Math.round(((value - thresholds.moderate) / (thresholds.unhealthySensitive - thresholds.moderate)) * 50);
-    color = '#FF7E00';
-    healthMessage = 'Sensitive groups should reduce outdoor activity';
-  } else if (value <= thresholds.unhealthy) {
-    category = 'unhealthy';
-    index = 150 + Math.round(((value - thresholds.unhealthySensitive) / (thresholds.unhealthy - thresholds.unhealthySensitive)) * 50);
-    color = '#FF0000';
-    healthMessage = 'Everyone should reduce outdoor activity';
-  } else if (value <= thresholds.veryUnhealthy) {
-    category = 'very_unhealthy';
-    index = 200 + Math.round(((value - thresholds.unhealthy) / (thresholds.veryUnhealthy - thresholds.unhealthy)) * 100);
-    color = '#8F3F97';
-    healthMessage = 'Health alert - avoid outdoor activity';
+  if (value <= AQI_THRESHOLDS.good) {
+    return { 
+      category: 'good', 
+      color: '#00E400', 
+      message: 'Air quality is satisfactory' 
+    };
+  } else if (value <= AQI_THRESHOLDS.moderate) {
+    return { 
+      category: 'moderate', 
+      color: '#FFFF00', 
+      message: 'Acceptable for most people' 
+    };
+  } else if (value <= AQI_THRESHOLDS.unhealthySensitive) {
+    return { 
+      category: 'unhealthy_sensitive', 
+      color: '#FF7E00', 
+      message: 'Sensitive groups should reduce outdoor activity' 
+    };
+  } else if (value <= AQI_THRESHOLDS.unhealthy) {
+    return { 
+      category: 'unhealthy', 
+      color: '#FF0000', 
+      message: 'Everyone should reduce outdoor activity' 
+    };
+  } else if (value <= AQI_THRESHOLDS.veryUnhealthy) {
+    return { 
+      category: 'very_unhealthy', 
+      color: '#8F3F97', 
+      message: 'Health alert - avoid outdoor activity' 
+    };
   } else {
-    category = 'hazardous';
-    index = 300 + Math.round(((value - thresholds.veryUnhealthy) / (thresholds.hazardous - thresholds.veryUnhealthy)) * 200);
-    color = '#7E0023';
-    healthMessage = 'Health warning - stay indoors';
+    return { 
+      category: 'hazardous', 
+      color: '#7E0023', 
+      message: 'Health warning - stay indoors' 
+    };
   }
-  
-  return { category, index, color, healthMessage };
 }
 
 /**
- * Fetch air quality data from EPA Ireland
- * Note: This is a mock implementation since EPA Ireland's API structure may vary
- * You'll need to adjust based on actual API response format
+ * Fetch air quality data from WAQI API
  */
 async function fetchAirQualityData() {
   try {
-    console.log('🌫️ Fetching air quality data...');
+    console.log('🌫️ Fetching REAL air quality data from WAQI...');
     
     const allStationData = [];
     
-    // For now, we'll use mock data since EPA API access may require specific setup
-    // Replace this with actual API calls when you have EPA API access
-    
     for (const station of DUBLIN_STATIONS) {
-      // MOCK DATA - Replace with actual API call
-      const mockData = {
-        station_id: station.id,
-        station_name: station.name,
-        position: {
-          lat: station.lat,
-          lng: station.lng
-        },
-        timestamp: new Date(),
-        pollutants: {
-          PM2_5: {
-            value: Math.random() * 30, // Mock value 0-30 μg/m³
-            unit: 'μg/m³'
-          },
-          PM10: {
-            value: Math.random() * 50, // Mock value 0-50 μg/m³
-            unit: 'μg/m³'
-          },
-          NO2: {
-            value: Math.random() * 100, // Mock value 0-100 μg/m³
-            unit: 'μg/m³'
-          }
-        }
-      };
-      
-      /* ACTUAL API CALL TEMPLATE (uncomment and modify when ready):
       try {
-        const response = await fetch(`${EPA_API_BASE}?station=${station.id}`);
-        const data = await response.json();
+        // Fetch by geo-location
+        const url = `${WAQI_API_BASE}/geo:${station.lat};${station.lng}/?token=${WAQI_TOKEN}`;
+        const response = await axios.get(url);
         
-        const stationData = {
-          station_id: station.id,
-          station_name: station.name,
-          position: { lat: station.lat, lng: station.lng },
-          timestamp: new Date(data.timestamp),
-          pollutants: {
-            PM2_5: { value: data.pm25, unit: 'μg/m³' },
-            PM10: { value: data.pm10, unit: 'μg/m³' },
-            NO2: { value: data.no2, unit: 'μg/m³' }
-          }
-        };
-        
-        allStationData.push(stationData);
-      } catch (error) {
-        console.error(`Error fetching station ${station.id}:`, error);
-      }
-      */
-      
-      // Calculate AQI for each pollutant
-      const pm25_aqi = calculateAQI('PM2_5', mockData.pollutants.PM2_5.value);
-      const pm10_aqi = calculateAQI('PM10', mockData.pollutants.PM10.value);
-      const no2_aqi = calculateAQI('NO2', mockData.pollutants.NO2.value);
-      
-      // Overall AQI is the worst (highest) of all pollutants
-      const overallAQI = Math.max(pm25_aqi.index, pm10_aqi.index, no2_aqi.index);
-      const worstPollutant = [
-        { name: 'PM2.5', aqi: pm25_aqi },
-        { name: 'PM10', aqi: pm10_aqi },
-        { name: 'NO2', aqi: no2_aqi }
-      ].reduce((worst, current) => 
-        current.aqi.index > worst.aqi.index ? current : worst
-      );
-      
-      const enrichedData = {
-        ...mockData,
-        aqi: {
-          overall: overallAQI,
-          category: worstPollutant.aqi.category,
-          color: worstPollutant.aqi.color,
-          healthMessage: worstPollutant.aqi.healthMessage,
-          primaryPollutant: worstPollutant.name
-        },
-        pollutant_details: {
-          PM2_5: { ...mockData.pollutants.PM2_5, aqi: pm25_aqi },
-          PM10: { ...mockData.pollutants.PM10, aqi: pm10_aqi },
-          NO2: { ...mockData.pollutants.NO2, aqi: no2_aqi }
+        if (response.data.status === 'ok') {
+          const data = response.data.data;
+          const iaqi = data.iaqi || {};
+
+          // Extract individual pollutants if available
+          const pm25 = iaqi.pm25 ? iaqi.pm25.v : null;
+          const pm10 = iaqi.pm10 ? iaqi.pm10.v : null;
+          const no2 = iaqi.no2 ? iaqi.no2.v : null;
+          
+          // Get main AQI details
+          const aqiDetails = getAQIDetails(data.aqi);
+
+          const stationData = {
+            station_id: station.id,
+            station_name: station.name,
+            api_station_name: data.city.name, // Name returned by API
+            position: {
+              lat: station.lat,
+              lng: station.lng
+            },
+            timestamp: new Date(),
+            last_update: data.time.s, // Time from the station
+            
+            // Main AQI Score
+            aqi: {
+              overall: data.aqi,
+              category: aqiDetails.category,
+              color: aqiDetails.color,
+              healthMessage: aqiDetails.message,
+              primaryPollutant: data.dominentpol
+            },
+            
+            // Detailed pollutants
+            pollutants: {
+              PM2_5: { value: pm25, unit: 'μg/m³' },
+              PM10: { value: pm10, unit: 'μg/m³' },
+              NO2: { value: no2, unit: 'μg/m³' }
+            }
+          };
+          
+          allStationData.push(stationData);
+          console.log(`   ✅ Fetched ${station.name}: AQI ${data.aqi}`);
+        } else {
+          console.warn(`   ⚠️ WAQI error for ${station.name}:`, response.data.data);
         }
-      };
-      
-      allStationData.push(enrichedData);
+      } catch (err) {
+        console.error(`   ❌ Failed to fetch ${station.name}:`, err.message);
+      }
     }
     
-    console.log(`📊 Fetched air quality for ${allStationData.length} stations`);
+    console.log(`📊 Processed ${allStationData.length}/${DUBLIN_STATIONS.length} stations`);
     
-    // Save to Firestore
-    const result = await saveAirQualityData(allStationData);
-    
-    if (result.success) {
+    if (allStationData.length > 0) {
+      // Save to Firestore
+      const result = await saveAirQualityData(allStationData);
+      
       fetchCount++;
       lastFetchTime = new Date().toISOString();
       lastFetchStatus = `Success: ${allStationData.length} stations`;
-      
-      console.log(`✅ Air quality data saved (Fetch #${fetchCount})`);
       
       return {
         success: true,
@@ -215,12 +164,11 @@ async function fetchAirQualityData() {
         fetchCount: fetchCount
       };
     } else {
-      lastFetchStatus = `Error: ${result.error}`;
-      return result;
+      return { success: false, error: 'No data fetched' };
     }
     
   } catch (error) {
-    console.error('❌ Error fetching air quality:', error.message);
+    console.error('❌ Global fetch error:', error.message);
     lastFetchStatus = `Error: ${error.message}`;
     return {
       success: false,
@@ -236,27 +184,30 @@ async function saveAirQualityData(stationsData) {
   try {
     const db = admin.firestore();
     const batch = db.batch();
-    
     const timestamp = new Date();
     
     stationsData.forEach(station => {
-      const docRef = db.collection('air_quality').doc();
-      batch.set(docRef, {
+      // 1. Add to history collection (for graphing later)
+      const historyRef = db.collection('air_quality_history').doc();
+      batch.set(historyRef, {
+        ...station,
+        fetched_at: admin.firestore.Timestamp.fromDate(timestamp)
+      });
+
+      // 2. Update 'current' collection (for quick lookup)
+      // Using station ID as doc ID ensures we don't duplicate current readings
+      const currentRef = db.collection('air_quality').doc(station.station_id);
+      batch.set(currentRef, {
         ...station,
         fetched_at: admin.firestore.Timestamp.fromDate(timestamp),
-        created_at: admin.firestore.FieldValue.serverTimestamp()
+        updated_at: admin.firestore.FieldValue.serverTimestamp()
       });
     });
     
     await batch.commit();
+    console.log(`✅ Updated Firestore: ${stationsData.length} records`);
     
-    console.log(`✅ Saved ${stationsData.length} air quality readings to Firestore`);
-    
-    return {
-      success: true,
-      stationsAdded: stationsData.length,
-      timestamp: timestamp.toISOString()
-    };
+    return { success: true };
     
   } catch (error) {
     console.error('Error saving air quality data:', error);
@@ -271,14 +222,14 @@ async function getAirQualityForLocation(lat, lng) {
   try {
     const db = admin.firestore();
     
-    // Get most recent readings from all stations
-    const snapshot = await db.collection('air_quality')
-      .orderBy('created_at', 'desc')
-      .limit(10)
-      .get();
+    // Fetch all current readings
+    const snapshot = await db.collection('air_quality').get();
     
     if (snapshot.empty) {
-      return { success: false, error: 'No air quality data available' };
+      // Fallback to fetch if database is empty
+      console.log('⚠️ No data in DB, triggering fresh fetch...');
+      await fetchAirQualityData();
+      return getAirQualityForLocation(lat, lng); // Retry once
     }
     
     // Find nearest station using Haversine formula
@@ -287,21 +238,27 @@ async function getAirQualityForLocation(lat, lng) {
     
     snapshot.forEach(doc => {
       const data = doc.data();
-      const distance = calculateDistance(
-        lat, lng,
-        data.position.lat, data.position.lng
-      );
-      
-      if (distance < minDistance) {
-        minDistance = distance;
-        nearestStation = { id: doc.id, ...data, distance };
+      // Ensure data has position
+      if (data.position) {
+        const distance = calculateDistance(
+          lat, lng,
+          data.position.lat, data.position.lng
+        );
+        
+        if (distance < minDistance) {
+          minDistance = distance;
+          nearestStation = { ...data, distance };
+        }
       }
     });
     
+    if (!nearestStation) {
+      return { success: false, error: 'No stations found' };
+    }
+
     return {
       success: true,
-      station: nearestStation,
-      distance: minDistance
+      data: nearestStation // Keeping structure compatible with frontend
     };
     
   } catch (error) {
@@ -335,25 +292,16 @@ function toRad(degrees) {
  */
 function startAirQualityFetcher() {
   console.log('🕐 Starting Air Quality fetcher...');
-  console.log('📅 Schedule: Every 15 minutes');
   
   // Fetch immediately on start
-  fetchAirQualityData()
-    .then(result => {
-      if (result.success) {
-        console.log('✅ Initial air quality fetch completed');
-      } else {
-        console.log('⚠️ Initial fetch failed:', result.error);
-      }
-    });
+  fetchAirQualityData();
   
   // Schedule to run every 15 minutes
   const task = cron.schedule('*/15 * * * *', async () => {
-    console.log('\n⏰ Scheduled air quality fetch at', new Date().toISOString());
+    console.log('\n⏰ Scheduled air quality fetch...');
     await fetchAirQualityData();
   });
   
-  console.log('✅ Air Quality fetcher started');
   return task;
 }
 
@@ -371,11 +319,10 @@ function getAirQualityStats() {
   };
 }
 
+// Export the wrapper function for the frontend/server
 module.exports = {
   startAirQualityFetcher,
   fetchAirQualityData,
   getAirQualityForLocation,
-  getAirQualityStats,
-  calculateAQI,
-  DUBLIN_STATIONS
+  getAirQualityStats
 };

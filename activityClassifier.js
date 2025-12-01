@@ -14,36 +14,33 @@
  */
 class ActivityClassifier {
   constructor() {
-    // Thresholds calibrated for typical activities
+    // Thresholds calibrated for gentle/slow walking
     this.thresholds = {
       standing: {
-        magnitude: { min: 9.5, max: 10.5 },
-        variance: { max: 0.4 },
-        frequency: { max: 0.5 } // Hz
+        magnitude: { min: 9.0, max: 10.5 },
+        variance: { max: 0.3 }, // Lowered max so it stops capturing "gentle walks"
+        frequency: { max: 0.5 }
       },
       walking: {
-        magnitude: { min: 8.5, max: 13.0 },
-        variance: { min: 0.6, max: 6.0 },
-        frequency: { min: 1.2, max: 2.5 }, // ~2 Hz (120 steps/min)
-        speed: { min: 0.5, max: 2.5 } // m/s
+        magnitude: { min: 8.0, max: 20.0 },
+        variance: { min: 0.1, max: 10.0 }, // [CHANGE] Lowered min from 0.5 to 0.1
+        frequency: { min: 1.0, max: 3.0 }, // [CHANGE] Lowered min to 1.0 Hz
+        speed: { min: 0.1, max: 2.5 }      // [CHANGE] Lowered min from 0.5 to 0.1
       },
       running: {
-        magnitude: { min: 10.0, max: 25.0 },
-        variance: { min: 5.0, max: 20.0 },
-        frequency: { min: 2.3, max: 5.0 }, // ~3 Hz (180 steps/min)
-        speed: { min: 2.5, max: 10.0 } // m/s
+        magnitude: { min: 10.0, max: 60.0 },
+        variance: { min: 3.0, max: 200.0 },
+        frequency: { min: 2.0, max: 5.0 },
+        speed: { min: 2.5, max: 10.0 }
       },
       cycling: {
-        magnitude: { min: 9.0, max: 11.0 },
-        variance: { min: 0.2, max: 2.0 },
+        magnitude: { min: 8.5, max: 11.0 },
+        variance: { min: 0.3, max: 2.0 },
         frequency: { min: 0.5, max: 2.0 },
-        speed: { min: 3.5, max: 15.0 } // m/s
+        speed: { min: 3.0, max: 15.0 }
       },
       vehicle: {
-        // Realistic: Very smooth magnitude (suspension) but high speed
-        magnitude: { min: 9.0, max: 11.0 },
-        variance: { max: 2.0 },
-        speed: { min: 8.0 } // > ~30 km/h
+        speed: { min: 8.0 }
       }
     };
   }
@@ -143,6 +140,9 @@ class ActivityClassifier {
   /**
    * Determine activity based on metrics
    */
+  /**
+   * Determine activity based on metrics
+   */
   determineActivity(metrics) {
     const scores = {
       standing: 0,
@@ -152,53 +152,47 @@ class ActivityClassifier {
       vehicle: 0
     };
 
-    // Vehicle detection (highest priority - based on speed)
+    // 1. Vehicle (Speed based) - Highest priority if very fast
     if (metrics.speed.mean >= this.thresholds.vehicle.speed.min) {
       return { activity: 'vehicle', confidence: 0.95 };
     }
 
-    // Standing detection
-    if (this.isInRange(metrics.magnitude.mean, this.thresholds.standing.magnitude) &&
-      metrics.magnitude.variance <= this.thresholds.standing.variance.max &&
-      metrics.frequency <= this.thresholds.standing.frequency.max) {
-      scores.standing = 0.9;
+    // 2. Standing (Default baseline)
+    // If speed is basically zero and phone is still, assume standing
+    if (metrics.speed.mean < 0.3 && metrics.magnitude.variance < 0.3) {
+       scores.standing = 0.8; 
     }
 
-    // Walking detection
-    if (this.isInRange(metrics.magnitude.mean, this.thresholds.walking.magnitude) &&
-      this.isInRange(metrics.magnitude.variance, this.thresholds.walking.variance) &&
-      this.isInRange(metrics.frequency, this.thresholds.walking.frequency)) {
-      scores.walking = 0.85;
-
-      // Boost score if speed matches
-      if (this.isInRange(metrics.speed.mean, this.thresholds.walking.speed)) {
-        scores.walking += 0.1;
-      }
+    // 3. Walking Detection (Priority on Frequency)
+    // Even if variance is low (smooth walk), if we see a step rhythm (1-3 Hz), it's walking.
+    const validWalkingFreq = this.isInRange(metrics.frequency, this.thresholds.walking.frequency);
+    const validWalkingMag = this.isInRange(metrics.magnitude.mean, this.thresholds.walking.magnitude);
+    
+    if (validWalkingFreq && validWalkingMag) {
+       // If we have frequency, we just need EITHER movement or speed to confirm
+       if (metrics.speed.mean > 0.1 || metrics.magnitude.variance > 0.1) {
+          scores.walking = 0.9; // High confidence
+          scores.standing = 0;  // Override the standing baseline
+       }
     }
-
-    // Running detection
+    
+    // 4. Running Detection
     if (this.isInRange(metrics.magnitude.mean, this.thresholds.running.magnitude) &&
-      this.isInRange(metrics.magnitude.variance, this.thresholds.running.variance) &&
-      this.isInRange(metrics.frequency, this.thresholds.running.frequency)) {
+        this.isInRange(metrics.magnitude.variance, this.thresholds.running.variance)) {
       scores.running = 0.85;
-
-      // Boost score if speed matches
-      if (this.isInRange(metrics.speed.mean, this.thresholds.running.speed)) {
-        scores.running += 0.1;
-      }
+      if (metrics.speed.mean > 2.5) scores.running += 0.15;
     }
 
-    // Cycling detection
-    if (this.isInRange(metrics.magnitude.mean, this.thresholds.cycling.magnitude) &&
-      this.isInRange(metrics.magnitude.variance, this.thresholds.cycling.variance) &&
-      this.isInRange(metrics.speed.mean, this.thresholds.cycling.speed)) {
-      scores.cycling = 0.8;
+    // 5. Cycling Detection
+    if (this.isInRange(metrics.speed.mean, this.thresholds.cycling.speed) &&
+        metrics.magnitude.variance < 2.0) {
+       scores.cycling = 0.6; 
     }
 
     // Find activity with highest score
     let bestActivity = 'unknown';
-    let bestScore = 0.5; // Minimum confidence threshold
-
+    let bestScore = 0; 
+    
     for (const [activity, score] of Object.entries(scores)) {
       if (score > bestScore) {
         bestScore = score;
@@ -206,9 +200,15 @@ class ActivityClassifier {
       }
     }
 
+    // Fallback: If no strong signal, default to standing if speed is low
+    if (bestActivity === 'unknown' && metrics.speed.mean < 1.0) {
+        bestActivity = 'standing';
+        bestScore = 0.5;
+    }
+
     return {
       activity: bestActivity,
-      confidence: Math.min(bestScore, 0.99)
+      confidence: bestScore
     };
   }
 
