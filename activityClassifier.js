@@ -17,30 +17,33 @@ class ActivityClassifier {
     // Thresholds calibrated for typical activities
     this.thresholds = {
       standing: {
-        magnitude: { min: 9.0, max: 10.5 },
-        variance: { max: 0.5 },
+        magnitude: { min: 9.5, max: 10.5 },
+        variance: { max: 0.4 },
         frequency: { max: 0.5 } // Hz
       },
       walking: {
-        magnitude: { min: 8.0, max: 13.0 },
-        variance: { min: 0.5, max: 3.0 },
-        frequency: { min: 1.5, max: 2.5 }, // ~2 Hz (120 steps/min)
+        magnitude: { min: 8.5, max: 13.0 },
+        variance: { min: 0.6, max: 6.0 },
+        frequency: { min: 1.2, max: 2.5 }, // ~2 Hz (120 steps/min)
         speed: { min: 0.5, max: 2.5 } // m/s
       },
       running: {
-        magnitude: { min: 10.0, max: 20.0 },
-        variance: { min: 3.0, max: 10.0 },
-        frequency: { min: 2.5, max: 4.0 }, // ~3 Hz (180 steps/min)
-        speed: { min: 2.5, max: 6.0 } // m/s
+        magnitude: { min: 10.0, max: 25.0 },
+        variance: { min: 5.0, max: 20.0 },
+        frequency: { min: 2.3, max: 5.0 }, // ~3 Hz (180 steps/min)
+        speed: { min: 2.5, max: 10.0 } // m/s
       },
       cycling: {
-        magnitude: { min: 8.5, max: 11.0 },
-        variance: { min: 0.3, max: 2.0 },
+        magnitude: { min: 9.0, max: 11.0 },
+        variance: { min: 0.2, max: 2.0 },
         frequency: { min: 0.5, max: 2.0 },
-        speed: { min: 3.0, max: 10.0 } // m/s
+        speed: { min: 3.5, max: 15.0 } // m/s
       },
       vehicle: {
-        speed: { min: 8.0 } // m/s (~30 km/h)
+        // Realistic: Very smooth magnitude (suspension) but high speed
+        magnitude: { min: 9.0, max: 11.0 },
+        variance: { max: 2.0 },
+        speed: { min: 8.0 } // > ~30 km/h
       }
     };
   }
@@ -61,10 +64,10 @@ class ActivityClassifier {
 
     // Calculate metrics from the data window
     const metrics = this.calculateMetrics(dataWindow);
-    
+
     // Classify based on metrics
     const classification = this.determineActivity(metrics);
-    
+
     return {
       activity: classification.activity,
       confidence: classification.confidence,
@@ -80,7 +83,7 @@ class ActivityClassifier {
   calculateMetrics(dataWindow) {
     const magnitudes = dataWindow.map(d => d.accel_magnitude || 0);
     const speeds = dataWindow.map(d => d.speed || 0);
-    
+
     return {
       magnitude: {
         mean: this.mean(magnitudes),
@@ -102,26 +105,26 @@ class ActivityClassifier {
    */
   estimateFrequency(magnitudes) {
     if (magnitudes.length < 10) return 0;
-    
+
     // Find peaks (local maxima)
     const peaks = [];
     for (let i = 1; i < magnitudes.length - 1; i++) {
-      if (magnitudes[i] > magnitudes[i-1] && magnitudes[i] > magnitudes[i+1]) {
+      if (magnitudes[i] > magnitudes[i - 1] && magnitudes[i] > magnitudes[i + 1]) {
         peaks.push(i);
       }
     }
-    
+
     if (peaks.length < 2) return 0;
-    
+
     // Calculate average time between peaks
     const intervals = [];
     for (let i = 1; i < peaks.length; i++) {
-      intervals.push(peaks[i] - peaks[i-1]);
+      intervals.push(peaks[i] - peaks[i - 1]);
     }
-    
+
     const avgInterval = this.mean(intervals);
-    const samplingRate = 1.72; // Hz (from your data collection)
-    
+    const samplingRate = 10; // Hz (from your data collection)
+
     // Frequency = samplingRate / avgInterval
     return avgInterval > 0 ? samplingRate / avgInterval : 0;
   }
@@ -145,17 +148,17 @@ class ActivityClassifier {
 
     // Standing detection
     if (this.isInRange(metrics.magnitude.mean, this.thresholds.standing.magnitude) &&
-        metrics.magnitude.variance <= this.thresholds.standing.variance.max &&
-        metrics.frequency <= this.thresholds.standing.frequency.max) {
+      metrics.magnitude.variance <= this.thresholds.standing.variance.max &&
+      metrics.frequency <= this.thresholds.standing.frequency.max) {
       scores.standing = 0.9;
     }
 
     // Walking detection
     if (this.isInRange(metrics.magnitude.mean, this.thresholds.walking.magnitude) &&
-        this.isInRange(metrics.magnitude.variance, this.thresholds.walking.variance) &&
-        this.isInRange(metrics.frequency, this.thresholds.walking.frequency)) {
+      this.isInRange(metrics.magnitude.variance, this.thresholds.walking.variance) &&
+      this.isInRange(metrics.frequency, this.thresholds.walking.frequency)) {
       scores.walking = 0.85;
-      
+
       // Boost score if speed matches
       if (this.isInRange(metrics.speed.mean, this.thresholds.walking.speed)) {
         scores.walking += 0.1;
@@ -164,10 +167,10 @@ class ActivityClassifier {
 
     // Running detection
     if (this.isInRange(metrics.magnitude.mean, this.thresholds.running.magnitude) &&
-        this.isInRange(metrics.magnitude.variance, this.thresholds.running.variance) &&
-        this.isInRange(metrics.frequency, this.thresholds.running.frequency)) {
+      this.isInRange(metrics.magnitude.variance, this.thresholds.running.variance) &&
+      this.isInRange(metrics.frequency, this.thresholds.running.frequency)) {
       scores.running = 0.85;
-      
+
       // Boost score if speed matches
       if (this.isInRange(metrics.speed.mean, this.thresholds.running.speed)) {
         scores.running += 0.1;
@@ -176,15 +179,15 @@ class ActivityClassifier {
 
     // Cycling detection
     if (this.isInRange(metrics.magnitude.mean, this.thresholds.cycling.magnitude) &&
-        this.isInRange(metrics.magnitude.variance, this.thresholds.cycling.variance) &&
-        this.isInRange(metrics.speed.mean, this.thresholds.cycling.speed)) {
+      this.isInRange(metrics.magnitude.variance, this.thresholds.cycling.variance) &&
+      this.isInRange(metrics.speed.mean, this.thresholds.cycling.speed)) {
       scores.cycling = 0.8;
     }
 
     // Find activity with highest score
     let bestActivity = 'unknown';
     let bestScore = 0.5; // Minimum confidence threshold
-    
+
     for (const [activity, score] of Object.entries(scores)) {
       if (score > bestScore) {
         bestScore = score;
@@ -211,7 +214,7 @@ class ActivityClassifier {
       vehicle: 0.5, // Inside vehicle, some protection
       unknown: 1.0
     };
-    
+
     return impacts[activity] || 1.0;
   }
 
@@ -228,7 +231,7 @@ class ActivityClassifier {
       vehicle: 'low',
       unknown: 'medium'
     };
-    
+
     return sensitivity[activity] || 'medium';
   }
 
@@ -267,16 +270,16 @@ function classifyDataBatch(dataPoints) {
   const classifier = new ActivityClassifier();
   const windowSize = 10; // Classify based on 10-point windows
   const results = [];
-  
+
   for (let i = 0; i < dataPoints.length; i++) {
     // Get window of data around current point
     const windowStart = Math.max(0, i - Math.floor(windowSize / 2));
     const windowEnd = Math.min(dataPoints.length, i + Math.ceil(windowSize / 2));
     const window = dataPoints.slice(windowStart, windowEnd);
-    
+
     // Classify activity
     const classification = classifier.classifyActivity(window);
-    
+
     // Add classification to data point
     results.push({
       ...dataPoints[i],
@@ -286,7 +289,7 @@ function classifyDataBatch(dataPoints) {
       air_quality_sensitivity: classification.airQualitySensitivity
     });
   }
-  
+
   return results;
 }
 
@@ -295,37 +298,37 @@ function classifyDataBatch(dataPoints) {
  */
 function countSteps(dataPoints) {
   if (!dataPoints || dataPoints.length < 10) return 0;
-  
+
   let steps = 0;
   let lastPeakTime = 0;
-  
+
   // Thresholds
   const peakThreshold = 10.5; // m/s² - minimum magnitude to be a step
   const minTimeBetweenSteps = 300; // ms - max ~200 steps/min
-  
+
   for (let i = 2; i < dataPoints.length - 2; i++) {
     const current = dataPoints[i].accel_magnitude || 0;
     const prev = dataPoints[i - 1].accel_magnitude || 0;
     const next = dataPoints[i + 1].accel_magnitude || 0;
     const currentTime = dataPoints[i].timestamp;
-    
+
     // Detect peak: current is local maximum and above threshold
     if (current > peakThreshold &&
-        current > prev && 
-        current > next &&
-        (currentTime - lastPeakTime) > minTimeBetweenSteps) {
-      
+      current > prev &&
+      current > next &&
+      (currentTime - lastPeakTime) > minTimeBetweenSteps) {
+
       // Additional validation: check if it's a sharp peak
       const prev2 = dataPoints[i - 2].accel_magnitude || 0;
       const next2 = dataPoints[i + 2].accel_magnitude || 0;
-      
+
       if (current > prev2 && current > next2) {
         steps++;
         lastPeakTime = currentTime;
       }
     }
   }
-  
+
   return steps;
 }
 
@@ -334,11 +337,11 @@ function countSteps(dataPoints) {
  */
 function calculatePace(distanceKm, durationSeconds) {
   if (distanceKm <= 0 || durationSeconds <= 0) return null;
-  
+
   const paceMinPerKm = (durationSeconds / 60) / distanceKm;
   const minutes = Math.floor(paceMinPerKm);
   const seconds = Math.round((paceMinPerKm - minutes) * 60);
-  
+
   return {
     value: paceMinPerKm,
     display: `${minutes}:${seconds.toString().padStart(2, '0')}`
@@ -350,18 +353,18 @@ function calculatePace(distanceKm, durationSeconds) {
  */
 function estimateCalories(steps, distanceKm, durationMinutes, userWeight = 70) {
   // Multiple methods, use average
-  
+
   // Method 1: Based on steps
   const caloriesFromSteps = steps * 0.04 * (userWeight / 70);
-  
+
   // Method 2: Based on distance
   const caloriesFromDistance = distanceKm * userWeight * 0.75;
-  
+
   // Method 3: Based on MET (Metabolic Equivalent)
   // Walking ~3.5 MET, Running ~8 MET
   const avgMET = 5; // Mixed activity
   const caloriesFromMET = (avgMET * userWeight * durationMinutes) / 60;
-  
+
   // Average of all methods
   return Math.round((caloriesFromSteps + caloriesFromDistance + caloriesFromMET) / 3);
 }
@@ -373,20 +376,20 @@ function summarizeSession(dataPoints, distanceKm = 0) {
   const activityCounts = {};
   const activityDurations = {};
   let totalPoints = dataPoints.length;
-  
+
   dataPoints.forEach(point => {
     const activity = point.activity || 'unknown';
     activityCounts[activity] = (activityCounts[activity] || 0) + 1;
   });
-  
+
   // Calculate percentages and durations (assuming ~1.72 Hz sampling)
   const samplingInterval = 1 / 1.72; // seconds
   const summary = {};
-  
+
   for (const [activity, count] of Object.entries(activityCounts)) {
     const percentage = (count / totalPoints) * 100;
     const duration = count * samplingInterval; // seconds
-    
+
     summary[activity] = {
       count: count,
       percentage: percentage.toFixed(1),
@@ -394,24 +397,24 @@ function summarizeSession(dataPoints, distanceKm = 0) {
       durationMinutes: (duration / 60).toFixed(1)
     };
   }
-  
+
   // Determine primary activity
   const primaryActivity = Object.entries(activityCounts)
     .sort((a, b) => b[1] - a[1])[0];
-  
+
   // Count steps
   const steps = countSteps(dataPoints);
-  
+
   // Calculate total duration
   const totalDuration = Math.round(totalPoints * samplingInterval);
   const totalDurationMinutes = (totalDuration / 60);
-  
+
   // Calculate pace if we have distance
   const pace = distanceKm > 0 ? calculatePace(distanceKm, totalDuration) : null;
-  
+
   // Estimate calories
   const calories = estimateCalories(steps, distanceKm, totalDurationMinutes);
-  
+
   return {
     summary: summary,
     primaryActivity: primaryActivity ? primaryActivity[0] : 'unknown',
