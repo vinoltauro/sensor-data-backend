@@ -372,24 +372,53 @@ function estimateCalories(steps, distanceKm, durationMinutes, userWeight = 70) {
 /**
  * Summarize activities for a session
  */
+/**
+ * Summarize activities for a session
+ */
 function summarizeSession(dataPoints, distanceKm = 0) {
   const activityCounts = {};
-  const activityDurations = {};
   let totalPoints = dataPoints.length;
+  
+  if (totalPoints === 0) {
+    return {
+      summary: {},
+      primaryActivity: 'unknown',
+      totalDataPoints: 0,
+      totalDuration: 0,
+      totalDurationMinutes: "0.0",
+      steps: 0,
+      pace: null,
+      calories: 0,
+      distanceKm: distanceKm
+    };
+  }
 
+  // Count activities
   dataPoints.forEach(point => {
     const activity = point.activity || 'unknown';
     activityCounts[activity] = (activityCounts[activity] || 0) + 1;
   });
+  
+  // [FIX] Calculate REAL duration from timestamps
+  let totalDuration = 0;
+  if (totalPoints > 1) {
+    // Sort just in case, to ensure we get true start/end
+    const sortedPoints = [...dataPoints].sort((a, b) => a.timestamp - b.timestamp);
+    const startTime = sortedPoints[0].timestamp;
+    const endTime = sortedPoints[sortedPoints.length - 1].timestamp;
+    totalDuration = (endTime - startTime) / 1000; // Convert ms to seconds
+  }
 
-  // Calculate percentages and durations (assuming ~1.72 Hz sampling)
-  const samplingInterval = 1 / 1.72; // seconds
+  // [FIX] Calculate dynamic sampling interval based on actual data
+  // This allows the math to work for ANY sampling rate (1Hz, 10Hz, etc.)
+  const samplingInterval = totalDuration > 0 ? totalDuration / totalPoints : 0;
+  
   const summary = {};
-
+  
   for (const [activity, count] of Object.entries(activityCounts)) {
     const percentage = (count / totalPoints) * 100;
-    const duration = count * samplingInterval; // seconds
-
+    const duration = count * samplingInterval; // Distribute time proportionally
+    
     summary[activity] = {
       count: count,
       percentage: percentage.toFixed(1),
@@ -397,29 +426,28 @@ function summarizeSession(dataPoints, distanceKm = 0) {
       durationMinutes: (duration / 60).toFixed(1)
     };
   }
-
+  
   // Determine primary activity
   const primaryActivity = Object.entries(activityCounts)
     .sort((a, b) => b[1] - a[1])[0];
-
+  
   // Count steps
   const steps = countSteps(dataPoints);
-
-  // Calculate total duration
-  const totalDuration = Math.round(totalPoints * samplingInterval);
+  
+  // Calculate total duration in minutes
   const totalDurationMinutes = (totalDuration / 60);
-
+  
   // Calculate pace if we have distance
   const pace = distanceKm > 0 ? calculatePace(distanceKm, totalDuration) : null;
-
+  
   // Estimate calories
   const calories = estimateCalories(steps, distanceKm, totalDurationMinutes);
-
+  
   return {
     summary: summary,
     primaryActivity: primaryActivity ? primaryActivity[0] : 'unknown',
     totalDataPoints: totalPoints,
-    totalDuration: totalDuration,
+    totalDuration: Math.round(totalDuration),
     totalDurationMinutes: totalDurationMinutes.toFixed(1),
     steps: steps,
     pace: pace,
